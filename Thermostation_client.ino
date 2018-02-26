@@ -3,19 +3,28 @@
  Created:	12.11.2017 18:14:02
  Author:	allex
 */
+#include <SoftwareSerial.h>
 #include <Wire.h>
 #include "DHT.h"
 #include "SFE_BMP180.h"
 #include "OneWire.h"
 #include "config.h"
 
+#ifdef SENSOR_DHT22
 DHT dht(DHTPIN, DHTTYPE);
+#endif
+#ifdef SENSOR_DS18D20
 OneWire ds(DS18D20PIN);
+#endif
+#ifdef SENSOR_BMP180
 SFE_BMP180 pressure;
+#endif
+SoftwareSerial esp(WIFIRX, WIFITX);// RX, TX 
 
-bool isSetupOk = true;
+bool isSetupOk;
 int error = 0;
 
+#ifdef SENSOR_DHT22
 bool GetDHTData(double& hum, double& temp) {
 	double dht_hum = dht.readHumidity();
 	double dht_temp = dht.readTemperature();
@@ -26,7 +35,8 @@ bool GetDHTData(double& hum, double& temp) {
 	temp = dht_temp;
 	return true;
 }
-
+#endif
+#ifdef SENSOR_BMP180
 bool GetBMP180Data(double& press) {
 	char status;
 	double T, P, p0;
@@ -54,7 +64,8 @@ bool GetBMP180Data(double& press) {
 	}
 	return false;
 }
-
+#endif
+#ifdef SENSOR_DS18D20
 bool GetDS18D20Data(double& temp) {
 	byte i;
 	byte type_s;
@@ -117,11 +128,115 @@ bool GetDS18D20Data(double& temp) {
 	delay(250);
 	return true;
 }
+#endif
+
+bool WIFIReset() {
+	esp.println("AT+RST");
+	delay(2000);
+	if (esp.find("OK")) {
+		Serial.println("Module Reset");
+		return true;
+	}
+	else {
+		Serial.println("Fail to reset!");
+		return false;
+	}
+}
+
+bool WIFIConnect() {
+	String cmd = "AT+CWJAP=\"" + String(WIFISSID) + "\",\"" + String(WIFIPASSWORD) + "\"";
+	esp.println(cmd);
+	delay(4000);
+	if (esp.find("OK")) {
+		Serial.println("Connected!");
+		return true;
+	}
+	else {
+		Serial.println("Cannot connect to wifi");
+		return false;
+	}
+}
+
+bool WIFIPostData(String data) {
+	bool key = false;
+	int attemps = 6;
+	while ((!key) && (attemps >= 0)) {
+		esp.println("AT+CIPSTART=\"TCP\",\"" + String(SERVERIP) + "\",80");//start a TCP connection.
+		delay(2000);
+		if (esp.find("OK")) {
+			Serial.println("TCP Server start!");
+			key = true;
+		}
+		else {
+			Serial.println("TCP Server start failed!");
+			attemps--;
+		}
+	}
+
+	String postRequest =
+		"POST " + String(SERVERURI) + " HTTP/1.0\r\n" +
+		"Accept: *" + "/" + "*\r\n" +
+		"Content-Type: application/json\r\n" +
+		"Content-Length: " + data.length() + "\r\n" +
+		"\r\n" + data;
+
+	key = false;
+	while ((!key) && (attemps >= 0)) {
+		String sendCmd = "AT+CIPSEND=";//determine the number of caracters to be sent.
+		esp.print(sendCmd);
+		esp.println(postRequest.length());
+		delay(500);
+		if (esp.find(">")) {
+			Serial.println("Sending..");
+			esp.print(postRequest);
+			delay(500);
+			if (esp.find("SEND OK")) {
+				Serial.println("Packet sent");
+			}
+			else {
+				Serial.println(esp.read());
+				esp.println("AT+CIPCLOSE");
+				return false;
+			}
+			key = true;
+		}
+		else {
+			Serial.println("Size of packet dont set!");
+			attemps--;
+		}
+	}
+
+	if (attemps < 0) {
+		esp.println("AT+CIPCLOSE");
+		return false;
+	}
+
+	esp.println("AT+CIPCLOSE");
+	return true;
+}
+
+bool WIFISetBaudRate() {
+	esp.begin(WIFIBAUDRATE);
+	for (int i = 0; i < 3; i++)
+		esp.println("AT+CIOBAUD=9600");
+	delay(2000);
+	esp.end();
+}
+
 void setup() {
-	//WIFI setup will be here
+	delay(2000);
+	WIFISetBaudRate();
+	esp.begin(9600);
+	isSetupOk = false;
+	while (!WIFIReset());
+	while (!WIFIConnect());
+#ifdef SENSOR_DHT22
 	dht.begin();
+#endif
+#ifdef SENSOR_BMP180
 	if (!pressure.begin())
 		isSetupOk = false;
+#endif
 }
 
 void loop() {
@@ -165,7 +280,7 @@ void loop() {
 
 	json_answ += ",";
 	data = String(dht_temp);
-	json_answ += "\"in\":\"";
+	json_answ += "\"it\":\"";
 	json_answ += data;
 	json_answ += "\"";
 #endif
@@ -186,6 +301,13 @@ void loop() {
 	json_answ += "}";
 
 	Serial.println(json_answ);
-	if (current_error == error)
+
+	if (!WIFIPostData(json_answ))
+		error++;
+
+	if (current_error == error) {
 		error = 0;
+	} else{
+		Serial.println("Error!");
+	}
 }
